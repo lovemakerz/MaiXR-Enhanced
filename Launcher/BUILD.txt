@@ -1,3 +1,4 @@
 MaiMaiVRBootstrap.c is the portable native bootstrap source.
 Build it as a Windows x64 GUI-subsystem executable and name the output MaiMaiVR.exe.
-The source matches the V0.6.5 launcher behavior: it starts Scripts\MaiMaiVRLauncher_V0.6.5.ps1 from the portable application folder.
+V0.7.4 starts Scripts\MaiMaiVRLauncher_V0.7.4.ps1 directly.
+The distributed EXE was binary-retargeted from the validated x64 bootstrap because the versioned UTF-16 launcher path has identical length.

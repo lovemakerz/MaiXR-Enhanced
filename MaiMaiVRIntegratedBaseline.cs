@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -14,7 +14,7 @@ using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.Controls;
 
-[BepInPlugin("maimaivr.integrated.baseline", "MaiMaiVR Integrated Baseline", "0.6.6")]
+[BepInPlugin("maimaivr.integrated.baseline", "MaiMaiVR Integrated Baseline", "0.7.4")]
 public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
 {
     [DllImport("user32.dll", SetLastError = false)]
@@ -235,6 +235,8 @@ public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
     private int touchDataP2ChangeCount;
 
     private float serialTelemetryTimer;
+    private bool nativeIoEnabled;
+    private MaiMaiVRNativeIO nativeIoBridge;
 
     // V0.2.3: continuous P1 touch transport. Upstream MaiDXR only sends on
     // change + once per second; CiRCLE PLUS/game polling can miss those packets.
@@ -383,7 +385,7 @@ public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
         try { File.Delete(coinRequestPath); } catch { }
         File.WriteAllText(eventLog, "", Encoding.UTF8);
 
-        Log("BOOT V0.6.6 | VISUAL_BASELINE=V0.1.9_FROZEN");
+        Log("BOOT V0.7.4 | VISUAL_BASELINE=V0.1.9_FROZEN");
         Log("MODE=clean native P1 crop + physical display geometry fix");
         Log("MoveSpeed=" + MoveSpeed.ToString("F2", CultureInfo.InvariantCulture));
         Log("TurnSpeed=" + TurnSpeed.ToString("F2", CultureInfo.InvariantCulture));
@@ -397,18 +399,18 @@ public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
             " scaleX=" + P2SourceScaleX.ToString("F8", CultureInfo.InvariantCulture));
         Log("P2_TEXTURE_POLICY=share exact live P1 capture texture; no second window capture");
         Log("DISPLAY_LIFT_METERS=" + DisplayLiftMeters.ToString("F3", CultureInfo.InvariantCulture));
-        Log("IO_P1_POLICY=COM3 game side fixed | MaiDXR P1 partner auto-selected | visual baseline unchanged");
-        Log("TOUCH_TRANSPORT=continuous P1+P2 state streams ~90Hz when each serial port is open; P1 validated, P2 armed/unvalidated");
+        Log("IO_P1_POLICY=NATIVE_IO_SHARED_MEMORY | no COM3/COM5 | visual baseline unchanged");
+        Log("TOUCH_TRANSPORT=mai2io-rave shared memory @11ms keepalive; no virtual serial transport");
         Log("TOUCH_HAPTICS=hand-collider observer | onset 0.28/35ms | sustain 0.12 @30Hz | release grace 40ms");
-        Log("LED_TRANSPORT=COM21 game side / dynamic MaiDXR partner; upstream LightManager visuals preserved");
+        Log("LED_TRANSPORT=mai2io-rave shared memory GS output; no COM21/COM51");
         Log("LED_GLOBAL_STABILITY=CMD57 source guard; BodyLed/DisplayLed fixed without per-frame rewrite; RingLeds remain dynamic");
         Log("LED_SAFETY=malformed-frame guards enabled for LightManager");
         Log("ARCADE_NIGHT_V3=ambient10 reflection20 + ALL non-emissive cabinet/room materials x1.00; emissive/display/UI protected");
         Log("BUTTON_GLOW=dynamic emission + local Point halo | shadows OFF | range 0.28m | intensity 0.55");
         Log("REAL_CABINET_REFINED=less body brightness | visible white halo | whole-button glow + stronger tip glow | P1/P2 shared");
         Log("COIN_INPUT=left stick click -> elevated session bridge; no F2 mapping added");
-        Log("ESCAPE_CLOSE_ALL=V0.6.6 elevated bridge closes the complete game/MaiDXR session");
-        Log("BACKGROUND_TOUCH=Sinmai logical activation keepalive; Windows foreground remains available to spectator/MaiDXR");
+        Log("ESCAPE_CLOSE_ALL=V0.7.4 elevated bridge closes the complete game/MaiDXR session");
+        Log("BACKGROUND_TOUCH=Native IO removes serial focus dependency; V0.6.6 spectator focus policy retained");
         Log("RHYTHM_TOUCH=60Hz physics + native triggers + non-alloc swept-sphere recovery; transport remains 11ms");
 
         try
@@ -433,9 +435,38 @@ public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
             Log("MAIDXR_RUN_IN_BACKGROUND_FAIL " + ex.GetType().Name + ":" + ex.Message);
         }
 
+        nativeIoEnabled = string.Equals(
+            Environment.GetEnvironmentVariable("MAIMAIVR_NATIVE_IO"),
+            "1",
+            StringComparison.OrdinalIgnoreCase);
+
         ApplyCoinConfigFromEnvironment();
-        ApplyDynamicP1SerialPort();
-        ApplyDynamicLedSerialPort();
+
+        if (!nativeIoEnabled)
+        {
+            ApplyDynamicP1SerialPort();
+            ApplyDynamicLedSerialPort();
+        }
+        else
+        {
+            Log("NATIVE_IO_ACTIVE=True legacy serial port retargeting disabled");
+
+            try
+            {
+                nativeIoBridge = gameObject.GetComponent<MaiMaiVRNativeIO>();
+                if (nativeIoBridge == null)
+                    nativeIoBridge = gameObject.AddComponent<MaiMaiVRNativeIO>();
+
+                nativeIoBridge.Initialize(Log);
+                Log("NATIVE_IO_BRIDGE_ATTACH=OK owner=IntegratedBaseline");
+            }
+            catch (Exception ex)
+            {
+                Log("NATIVE_IO_BRIDGE_ATTACH_FAIL " + ex.GetType().Name + ":" + ex.Message);
+                throw;
+            }
+        }
+
         InstallLedSafetyPatches();
         AmbientLabAwake();
 
@@ -464,27 +495,34 @@ public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
         UpdateTouchHaptics();
         AmbientLabUpdate();
 
-        serialTelemetryTimer -= Time.unscaledDeltaTime;
+        // LightManager reflection is required in BOTH transports. In V0.7.1
+        // it was only discovered from the legacy serial telemetry branch, so
+        // Native IO left ledReflectionReady=false and disabled button/AMBIANT
+        // lighting even when mai2io-rave was producing valid LED frames.
         ledTelemetryTimer -= Time.unscaledDeltaTime;
-
-        if (serialTelemetryTimer <= 0f)
-        {
-            serialTelemetryTimer = 0.10f;
-            PollSerialTelemetry();
-            EnsureContinuousTouchThread();
-        }
-
         if (ledTelemetryTimer <= 0f)
         {
             ledTelemetryTimer = 0.10f;
             PollLedTelemetry();
         }
 
-        if (continuousTouchEverActive && !continuousTouchActiveLogged)
+        if (!nativeIoEnabled)
         {
-            continuousTouchActiveLogged = true;
-            Log("CONTINUOUS_TOUCH_ACTIVE intervalMs=" + ContinuousTouchIntervalMs +
-                " targetHz=" + (1000.0 / ContinuousTouchIntervalMs).ToString("F1", CultureInfo.InvariantCulture));
+            serialTelemetryTimer -= Time.unscaledDeltaTime;
+
+            if (serialTelemetryTimer <= 0f)
+            {
+                serialTelemetryTimer = 0.10f;
+                PollSerialTelemetry();
+                EnsureContinuousTouchThread();
+            }
+
+            if (continuousTouchEverActive && !continuousTouchActiveLogged)
+            {
+                continuousTouchActiveLogged = true;
+                Log("CONTINUOUS_TOUCH_ACTIVE intervalMs=" + ContinuousTouchIntervalMs +
+                    " targetHz=" + (1000.0 / ContinuousTouchIntervalMs).ToString("F1", CultureInfo.InvariantCulture));
+            }
         }
 
         if (statusTimer <= 0f)
@@ -523,8 +561,11 @@ public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
         ReleaseCoinKeyIfNeeded();
         StopTouchHaptics(true);
         StopTouchHaptics(false);
-        StopContinuousTouchThread();
-        UpdateContinuousTouchRate();
+        if (!nativeIoEnabled)
+        {
+            StopContinuousTouchThread();
+            UpdateContinuousTouchRate();
+        }
         WriteStatus();
     }
 
@@ -2664,9 +2705,9 @@ public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
         }
 
         bool ready =
-            lightP1SerialField != null &&
             lightManagerInstance != null &&
-            lightRingLedsField != null;
+            lightRingLedsField != null &&
+            (nativeIoEnabled || lightP1SerialField != null);
 
         if (ready && !ledReflectionReady)
         {
@@ -4139,8 +4180,49 @@ public partial class MaiMaiVRIntegratedBaseline : BaseUnityPlugin
         {
             StringBuilder sb = new StringBuilder();
 
-            sb.AppendLine("MaiMaiVR Integrated Baseline V0.6.6");
+            sb.AppendLine("MaiMaiVR Integrated Baseline V0.7.4");
             sb.AppendLine("Time=" + DateTime.Now.ToString("O"));
+            sb.AppendLine("NativeIO=" + nativeIoEnabled);
+            sb.AppendLine("NativeIOBridge=" + (nativeIoBridge != null ? "ATTACHED" : "ABSENT"));
+            sb.AppendLine("LedReflectionReady=" + ledReflectionReady);
+            if (nativeIoBridge != null)
+            {
+                sb.AppendLine("NativeIOBridgeInitialized=" + nativeIoBridge.IsInitialized);
+                sb.AppendLine("NativeIOMappingConnected=" + nativeIoBridge.IsMappingConnected);
+                sb.AppendLine("NativeIOGameEndpointSeen=" + nativeIoBridge.IsGameEndpointSeen);
+                sb.AppendLine("NativeIOPublishCount=" + nativeIoBridge.PublishCount);
+                sb.AppendLine("NativeIOTouchChanges=" + nativeIoBridge.TouchChangeCount);
+                sb.AppendLine("NativeIOOutputSnapshots=" + nativeIoBridge.OutputSnapshotCount);
+                sb.AppendLine("NativeIOLastOutputSequence=" + nativeIoBridge.LastAppliedOutputSequence);
+                sb.AppendLine("NativeIOGSChanges=" + nativeIoBridge.GsChangeCount);
+                sb.AppendLine("NativeIODCChanges=" + nativeIoBridge.DcChangeCount);
+                sb.AppendLine("NativeIOBillboardChanges=" + nativeIoBridge.BillboardChangeCount);
+                sb.AppendLine("NativeIOFETChanges=" + nativeIoBridge.FetChangeCount);
+                sb.AppendLine("NativeIOLedSource=" + nativeIoBridge.LastLedSource);
+                sb.AppendLine("NativeIOMappingFailures=" + nativeIoBridge.MappingFailureCount);
+                sb.AppendLine("NativeIODiagConnected=" + nativeIoBridge.IsNativeDiagConnected);
+                sb.AppendLine("NativeIODiagProcessId=" + nativeIoBridge.NativeDiagProcessId);
+                sb.AppendLine("NativeIODiagPollCalls=" + nativeIoBridge.NativeDiagPollCalls);
+                sb.AppendLine("NativeIODiagTouchInitCalls=" + nativeIoBridge.NativeDiagTouchInitCalls);
+                sb.AppendLine("NativeIODiagTouchUpdateCalls=" + nativeIoBridge.NativeDiagTouchUpdateCalls);
+                sb.AppendLine("NativeIODiagTouchCallbackFrames=" + nativeIoBridge.NativeDiagTouchCallbackFrames);
+                sb.AppendLine("NativeIODiagTouchNonzeroFrames=" + nativeIoBridge.NativeDiagTouchNonzeroFrames);
+                sb.AppendLine("NativeIODiagArmRequests=" + nativeIoBridge.NativeDiagArmRequests);
+                sb.AppendLine("NativeIODiagArmOpenAttempts=" + nativeIoBridge.NativeDiagArmOpenAttempts);
+                sb.AppendLine("NativeIODiagArmOpenSuccesses=" + nativeIoBridge.NativeDiagArmOpenSuccesses);
+                sb.AppendLine("NativeIODiagArmWriteAttempts=" + nativeIoBridge.NativeDiagArmWriteAttempts);
+                sb.AppendLine("NativeIODiagArmWriteSuccesses=" + nativeIoBridge.NativeDiagArmWriteSuccesses);
+                sb.AppendLine("NativeIODiagLastArmOpenError=" + nativeIoBridge.NativeDiagLastArmOpenError);
+                sb.AppendLine("NativeIODiagLastArmWriteError=" + nativeIoBridge.NativeDiagLastArmWriteError);
+                sb.AppendLine("NativeIODiagP1Enabled=" + nativeIoBridge.NativeDiagP1Enabled);
+                sb.AppendLine("NativeIODiagHeartbeatMs=" + nativeIoBridge.NativeDiagHeartbeatMs);
+                sb.AppendLine("NativeIODiagLedInitCalls=" + nativeIoBridge.NativeDiagLedInitCalls);
+                sb.AppendLine("NativeIODiagLedFetCalls=" + nativeIoBridge.NativeDiagLedFetCalls);
+                sb.AppendLine("NativeIODiagLedDcCalls=" + nativeIoBridge.NativeDiagLedDcCalls);
+                sb.AppendLine("NativeIODiagLedGsCalls=" + nativeIoBridge.NativeDiagLedGsCalls);
+                sb.AppendLine("NativeIODiagLedBillboardCalls=" + nativeIoBridge.NativeDiagLedBillboardCalls);
+            }
+            sb.AppendLine("NativeIOMapping=Local\\MAI2IO_RAVE_V2");
             sb.AppendLine("LeftStick=" + (leftStick != null));
             sb.AppendLine("LeftStickClick=" + (leftStickClick != null));
             sb.AppendLine("CoinInput=LEFT_STICK_CLICK_ONLY");

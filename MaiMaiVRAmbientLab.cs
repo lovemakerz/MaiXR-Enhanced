@@ -3070,6 +3070,23 @@ public partial class MaiMaiVRIntegratedBaseline
                 positions.Add(l.transform.position);
         }
 
+        // Native IO must not make AMBIANT geometry depend on the legacy
+        // serial LightManager path. If the legacy contour helpers have not
+        // been built yet, derive the exact same circle directly from the
+        // eight serialized RingLed transforms.
+        if (positions.Count < 4)
+        {
+            AmbientLabEnsureP1SourceRingLights();
+            positions.Clear();
+
+            for (int i = 0; i < ambientLabP1SourceRingLights.Count; i++)
+            {
+                Light source = ambientLabP1SourceRingLights[i];
+                if (source != null)
+                    positions.Add(source.transform.position);
+            }
+        }
+
         if (positions.Count < 4)
             return false;
 
