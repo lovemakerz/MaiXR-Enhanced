@@ -13,6 +13,8 @@ Enhanced VR arcade experience for **maimai DX**, based on [MaiDXR](https://githu
 
 MaiMaiVR - Enhanced extends MaiDXR with additional features focused on:
 
+- NATIVE IO !!!
+- Support Internationnal and Japanese version
 - easier setup
 - improved VR interaction
 - more reliable rhythm-game touch detection
